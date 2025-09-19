@@ -1,5 +1,5 @@
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
-import { initializeApp, getFirestore, cert } from "npm:firebase-admin@^11.0.0";
+import { initializeApp } from "firebase-admin";
 import { fetch } from "https://deno.land/x/fetch/mod.ts";
 
 // Configurações do Firebase Admin SDK - usando os segredos do Supabase
