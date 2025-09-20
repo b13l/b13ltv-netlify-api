@@ -22,7 +22,8 @@ if (!getApps().length) {
 }
 
 // 🛒 Mercado Pago / WhatsApp tokens
-const mercadoPagoAccessToken = process.env.MP_ACCESS_TOKEN || process.env.MP_TEST_ACCESS_TOKEN;
+const mercadoPagoAccessToken =
+  process.env.MP_ACCESS_TOKEN || process.env.MP_TEST_ACCESS_TOKEN;
 const whatsappPhoneId = process.env.WHATSAPP_PHONE_ID;
 const whatsappAccessToken = process.env.WHATSAPP_ACCESS_TOKEN;
 
@@ -31,6 +32,26 @@ function generatePin(): string {
   const min = 100000;
   const max = 999999;
   return Math.floor(Math.random() * (max - min + 1) + min).toString();
+}
+
+// 🔄 Função para consultar pagamento com retry
+async function getPayment(paymentId: string, token: string) {
+  const url = `https://api.mercadopago.com/v1/payments/${paymentId}`;
+  for (let i = 0; i < 3; i++) {
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+
+    if (res.ok) {
+      return res.json();
+    } else {
+      const err = await res.json().catch(() => ({}));
+      console.warn(`⚠️ Tentativa ${i + 1} falhou ao consultar pagamento:`, err);
+    }
+
+    await new Promise((r) => setTimeout(r, 2000)); // espera 2s
+  }
+  throw new Error("Pagamento não encontrado após múltiplas tentativas");
 }
 
 // 🚀 Função principal
@@ -45,22 +66,29 @@ export const handler = async (event: any) => {
   try {
     const payload = JSON.parse(event.body);
 
+    // 📩 Loga o payload completo recebido
+    console.log("📩 Payload recebido:", JSON.stringify(payload, null, 2));
+
     if (
       payload.action === "payment.created" ||
       payload.action === "payment.updated" ||
       payload.topic === "payment"
     ) {
-      const paymentId = payload.data.id;
+      const paymentId = payload.data?.id;
 
-      // 🔍 Consulta o pagamento no Mercado Pago
-      const mpRes = await fetch(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
-        headers: {
-          Authorization: `Bearer ${mercadoPagoAccessToken}`,
-        },
-      });
+      if (!paymentId) {
+        console.warn("⚠️ Nenhum paymentId encontrado no payload:", payload);
+        return {
+          statusCode: 400,
+          body: JSON.stringify({ error: "paymentId não encontrado no payload" }),
+        };
+      }
 
-      if (!mpRes.ok) {
-        const err = await mpRes.json();
+      // 🔍 Consulta o pagamento no Mercado Pago com retry
+      let paymentStatus;
+      try {
+        paymentStatus = await getPayment(paymentId, mercadoPagoAccessToken);
+      } catch (err) {
         console.error("❌ Erro ao consultar pagamento:", err);
         return {
           statusCode: 500,
@@ -68,11 +96,8 @@ export const handler = async (event: any) => {
         };
       }
 
-      const paymentStatus = await mpRes.json();
-
       // ✅ Verifica se o pagamento foi aprovado
       if (paymentStatus.status === "approved") {
-        // 🔒 Verifica se o telefone está disponível
         const customerPhoneNumber = paymentStatus?.payer?.phone?.number;
 
         if (!customerPhoneNumber) {
