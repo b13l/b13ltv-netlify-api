@@ -1,69 +1,82 @@
-import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
-import { initializeApp } from "firebase-admin";
-import { fetch } from "https://deno.land/x/fetch/mod.ts";
+const fetch = require("node-fetch");
+const admin = require("firebase-admin");
 
-// Configurações do Firebase Admin SDK - usando os segredos do Supabase
-const serviceAccount = {
-  projectId: Deno.env.get("FIREBASE_PROJECT_ID"),
-  clientEmail: Deno.env.get("FIREBASE_CLIENT_EMAIL"),
-  privateKey: Deno.env.get("FIREBASE_PRIVATE_KEY")?.replace(/\\n/g, "\n"),
-};
+// Inicializa o Firebase apenas uma vez
+if (!admin.apps.length) {
+  admin.initializeApp({
+    credential: admin.credential.cert({
+      projectId: process.env.FIREBASE_PROJECT_ID,
+      clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+      privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+    }),
+  });
+}
 
-// Inicializa o Firebase com as credenciais do Admin SDK
-initializeApp({ credential: cert(serviceAccount) });
-const db = getFirestore();
+const db = admin.firestore();
 
-// Credenciais do Mercado Pago e URL da API do WhatsApp
-const mercadoPagoAccessToken = Deno.env.get("MP_ACCESS_TOKEN");
-const whatsappPhoneId = Deno.env.get("WHATSAPP_PHONE_ID");
-const whatsappAccessToken = Deno.env.get("WHATSAPP_ACCESS_TOKEN");
-
-// Função para gerar um PIN aleatório de 6 dígitos
-function generatePin(): string {
+// Função para gerar PIN aleatório
+function generatePin() {
   const min = 100000;
   const max = 999999;
   return Math.floor(Math.random() * (max - min + 1) + min).toString();
 }
 
-// Handler da função de borda
-serve(async (req) => {
-  if (req.method !== "POST") {
-    return new Response(JSON.stringify({ error: "Method not allowed" }), { status: 405 });
+exports.handler = async function (event, context) {
+  // ✅ Permite debug pelo navegador
+  if (event.httpMethod === "GET") {
+    return {
+      statusCode: 200,
+      body: "✅ Webhook ativo. Use POST para enviar notificações.",
+    };
+  }
+
+  // ❌ Rejeita métodos que não sejam POST
+  if (event.httpMethod !== "POST") {
+    return {
+      statusCode: 405,
+      body: JSON.stringify({ error: "Method not allowed" }),
+    };
   }
 
   try {
-    const payload = await req.json();
+    console.log("🔔 Webhook recebido");
 
-    // Verifica se a notificação é sobre um pagamento
-    if (payload.action === "payment.created" || payload.action === "payment.updated") {
+    const payload = JSON.parse(event.body);
+    console.log("📦 Payload recebido:", payload);
+
+    // Verifica se é notificação de pagamento
+    if (payload.topic === "payment") {
       const paymentId = payload.data.id;
+      console.log("🔍 Consultando pagamento:", paymentId);
 
-      // Chama a API do Mercado Pago para verificar o status real do pagamento
+      // Consulta o status real do pagamento no Mercado Pago
       const mpResponse = await fetch(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
         headers: {
-          "Authorization": `Bearer ${mercadoPagoAccessToken}`,
+          Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN}`,
         },
       });
+
       const paymentStatus = await mpResponse.json();
-      
-      const customerPhoneNumber = paymentStatus.payer.phone.number;
+      console.log("📄 Dados do pagamento:", paymentStatus);
+
+      const customerPhoneNumber = paymentStatus.payer?.phone?.number;
 
       if (paymentStatus.status === "approved") {
         const pin = generatePin();
         const expirationDate = new Date();
-        expirationDate.setDate(expirationDate.getDate() + 30); // 30 dias de validade
+        expirationDate.setDate(expirationDate.getDate() + 30); // 30 dias
 
-        // Salva o PIN no Firebase Firestore
+        // Salva no Firestore
         await db.collection("pins").doc(pin).set({
-          pin: pin,
-          expirationDate: expirationDate,
+          pin,
+          expirationDate,
           isActive: true,
           mercadoPagoPaymentId: paymentId,
         });
 
-        console.log(`PIN ${pin} gerado e salvo para o pagamento ${paymentId}`);
+        console.log(`✅ PIN ${pin} salvo no Firestore`);
 
-        // Lógica para enviar o PIN via WhatsApp
+        // Envia via WhatsApp
         const whatsappPayload = {
           messaging_product: "whatsapp",
           to: customerPhoneNumber,
@@ -72,25 +85,37 @@ serve(async (req) => {
             body: `Seu PIN B13L TV é: ${pin}. O PIN tem validade de 30 dias.`,
           },
         };
-        
-        await fetch(`https://graph.facebook.com/v16.0/${whatsappPhoneId}/messages`, {
+
+        const waResponse = await fetch(`https://graph.facebook.com/v16.0/${process.env.WHATSAPP_PHONE_ID}/messages`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            "Authorization": `Bearer ${whatsappAccessToken}`,
+            Authorization: `Bearer ${process.env.WHATSAPP_ACCESS_TOKEN}`,
           },
           body: JSON.stringify(whatsappPayload),
         });
 
-        return new Response(JSON.stringify({ success: true, message: "PIN gerado e salvo" }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
+        const waResult = await waResponse.json();
+        console.log("📤 WhatsApp enviado:", waResult);
+
+        return {
+          statusCode: 200,
+          body: JSON.stringify({ success: true, message: "PIN gerado e WhatsApp enviado" }),
+        };
+      } else {
+        console.log("⚠️ Pagamento não aprovado:", paymentStatus.status);
       }
     }
 
-    return new Response(JSON.stringify({ success: true, message: "No relevant action" }), { status: 200 });
+    return {
+      statusCode: 200,
+      body: JSON.stringify({ success: true, message: "Notificação recebida, sem ação necessária" }),
+    };
   } catch (error) {
-    return new Response(JSON.stringify({ error: error.message }), { status: 500 });
+    console.error("❌ Erro:", error);
+    return {
+      statusCode: 500,
+      body: JSON.stringify({ error: error.message }),
+    };
   }
-});
+};
