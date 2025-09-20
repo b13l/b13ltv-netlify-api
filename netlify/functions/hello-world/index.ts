@@ -1,23 +1,34 @@
-const fetch = require("node-fetch");
-const admin = require("firebase-admin");
+import { initializeApp, cert } from "firebase-admin/app";
+import { getFirestore } from "firebase-admin/firestore";
+import fetch from "node-fetch"; // Troquei o import para Node.js
 
-admin.initializeApp({
-  credential: admin.credential.cert({
-    projectId: process.env.FIREBASE_PROJECT_ID,
-    clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-    privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-  }),
-});
+// Configurações do Firebase Admin SDK
+const serviceAccount = {
+  projectId: process.env.FIREBASE_PROJECT_ID,
+  clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+  privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, "\n"),
+};
 
-const db = admin.firestore();
+// Inicializa o Firebase apenas se ainda não estiver inicializado
+if (!initializeApp.length) {
+  initializeApp({ credential: cert(serviceAccount) });
+}
+const db = getFirestore();
 
-function generatePin() {
+// Credenciais do Mercado Pago e WhatsApp
+const mercadoPagoAccessToken = process.env.MP_ACCESS_TOKEN;
+const whatsappPhoneId = process.env.WHATSAPP_PHONE_ID;
+const whatsappAccessToken = process.env.WHATSAPP_ACCESS_TOKEN;
+
+// Função auxiliar para gerar PIN
+function generatePin(): string {
   const min = 100000;
   const max = 999999;
   return Math.floor(Math.random() * (max - min + 1) + min).toString();
 }
 
-exports.handler = async function (event, context) {
+// Função principal
+export const handler = async (event: any) => {
   if (event.httpMethod !== "POST") {
     return {
       statusCode: 405,
@@ -28,30 +39,57 @@ exports.handler = async function (event, context) {
   try {
     const payload = JSON.parse(event.body);
 
-    if (payload.topic === "payment") {
+    if (
+      payload.action === "payment.created" ||
+      payload.action === "payment.updated" ||
+      payload.topic === "payment"
+    ) {
       const paymentId = payload.data.id;
 
-      const mpResponse = await fetch(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
+      // Consulta o pagamento no Mercado Pago
+      const mpRes = await fetch(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
         headers: {
-          "Authorization": `Bearer ${process.env.MP_ACCESS_TOKEN}`,
+          Authorization: `Bearer ${mercadoPagoAccessToken}`,
         },
       });
 
-      const paymentStatus = await mpResponse.json();
-      const customerPhoneNumber = paymentStatus.payer.phone.number;
+      if (!mpRes.ok) {
+        const err = await mpRes.json();
+        console.error("Erro ao consultar o pagamento:", err);
+        return {
+          statusCode: 500,
+          body: JSON.stringify({ error: "Erro ao consultar pagamento no Mercado Pago" }),
+        };
+      }
+
+      const paymentStatus = await mpRes.json();
 
       if (paymentStatus.status === "approved") {
+        // 🔐 Verificação de telefone
+        const customerPhoneNumber = paymentStatus?.payer?.phone?.number;
+        if (!customerPhoneNumber) {
+          console.warn("Telefone do cliente não disponível:", paymentStatus.payer);
+          return {
+            statusCode: 400,
+            body: JSON.stringify({ error: "Número de telefone não encontrado no pagamento." }),
+          };
+        }
+
+        // 🎟️ Geração do PIN
         const pin = generatePin();
         const expirationDate = new Date();
         expirationDate.setDate(expirationDate.getDate() + 30);
 
         await db.collection("pins").doc(pin).set({
-          pin: pin,
-          expirationDate: expirationDate,
+          pin,
+          expirationDate,
           isActive: true,
           mercadoPagoPaymentId: paymentId,
         });
 
+        console.log(`PIN ${pin} gerado e salvo para o pagamento ${paymentId}`);
+
+        // 📲 Envio do WhatsApp
         const whatsappPayload = {
           messaging_product: "whatsapp",
           to: customerPhoneNumber,
@@ -61,18 +99,18 @@ exports.handler = async function (event, context) {
           },
         };
 
-        await fetch(`https://graph.facebook.com/v16.0/${process.env.WHATSAPP_PHONE_ID}/messages`, {
+        await fetch(`https://graph.facebook.com/v16.0/${whatsappPhoneId}/messages`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            "Authorization": `Bearer ${process.env.WHATSAPP_ACCESS_TOKEN}`,
+            Authorization: `Bearer ${whatsappAccessToken}`,
           },
           body: JSON.stringify(whatsappPayload),
         });
 
         return {
           statusCode: 200,
-          body: JSON.stringify({ success: true, message: "PIN gerado e enviado" }),
+          body: JSON.stringify({ success: true, message: "PIN gerado e enviado com sucesso" }),
         };
       }
     }
@@ -81,8 +119,8 @@ exports.handler = async function (event, context) {
       statusCode: 200,
       body: JSON.stringify({ success: true, message: "Notificação ignorada" }),
     };
-  } catch (error) {
-    console.error("Erro:", error);
+  } catch (error: any) {
+    console.error("❌ Erro:", error);
     return {
       statusCode: 500,
       body: JSON.stringify({ error: error.message }),
