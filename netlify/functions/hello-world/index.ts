@@ -22,8 +22,7 @@ if (!getApps().length) {
 }
 
 // 🛒 Mercado Pago / WhatsApp tokens
-const mercadoPagoAccessToken =
-  process.env.MP_ACCESS_TOKEN || process.env.MP_TEST_ACCESS_TOKEN;
+const mercadoPagoAccessToken = process.env.MP_TEST_ACCESS_TOKEN;
 const whatsappPhoneId = process.env.WHATSAPP_PHONE_ID;
 const whatsappAccessToken = process.env.WHATSAPP_ACCESS_TOKEN;
 
