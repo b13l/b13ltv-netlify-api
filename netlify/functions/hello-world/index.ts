@@ -1,33 +1,39 @@
-import { initializeApp, cert } from "firebase-admin/app";
+import { initializeApp, cert, getApps } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
-import fetch from "node-fetch"; // Troquei o import para Node.js
+import fetch from "node-fetch";
 
-// Configurações do Firebase Admin SDK
-const serviceAccount = {
-  projectId: process.env.FIREBASE_PROJECT_ID,
-  clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-  privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, "\n"),
-};
+// 🔐 Inicialização segura do Firebase
+let db;
 
-// Inicializa o Firebase apenas se ainda não estiver inicializado
-if (!initializeApp.length) {
-  initializeApp({ credential: cert(serviceAccount) });
+if (!getApps().length) {
+  const serviceAccount = {
+    projectId: process.env.FIREBASE_PROJECT_ID,
+    clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+    privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, "\n"),
+  };
+
+  const app = initializeApp({
+    credential: cert(serviceAccount),
+  });
+
+  db = getFirestore(app);
+} else {
+  db = getFirestore();
 }
-const db = getFirestore();
 
-// Credenciais do Mercado Pago e WhatsApp
+// 🛒 Mercado Pago / WhatsApp tokens
 const mercadoPagoAccessToken = process.env.MP_ACCESS_TOKEN;
 const whatsappPhoneId = process.env.WHATSAPP_PHONE_ID;
 const whatsappAccessToken = process.env.WHATSAPP_ACCESS_TOKEN;
 
-// Função auxiliar para gerar PIN
+// 🔢 Geração de PIN aleatório
 function generatePin(): string {
   const min = 100000;
   const max = 999999;
   return Math.floor(Math.random() * (max - min + 1) + min).toString();
 }
 
-// Função principal
+// 🚀 Função principal
 export const handler = async (event: any) => {
   if (event.httpMethod !== "POST") {
     return {
@@ -46,7 +52,7 @@ export const handler = async (event: any) => {
     ) {
       const paymentId = payload.data.id;
 
-      // Consulta o pagamento no Mercado Pago
+      // 🔍 Consulta o pagamento no Mercado Pago
       const mpRes = await fetch(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
         headers: {
           Authorization: `Bearer ${mercadoPagoAccessToken}`,
@@ -55,7 +61,7 @@ export const handler = async (event: any) => {
 
       if (!mpRes.ok) {
         const err = await mpRes.json();
-        console.error("Erro ao consultar o pagamento:", err);
+        console.error("❌ Erro ao consultar pagamento:", err);
         return {
           statusCode: 500,
           body: JSON.stringify({ error: "Erro ao consultar pagamento no Mercado Pago" }),
@@ -64,18 +70,20 @@ export const handler = async (event: any) => {
 
       const paymentStatus = await mpRes.json();
 
+      // ✅ Verifica se o pagamento foi aprovado
       if (paymentStatus.status === "approved") {
-        // 🔐 Verificação de telefone
+        // 🔒 Verifica se o telefone está disponível
         const customerPhoneNumber = paymentStatus?.payer?.phone?.number;
+
         if (!customerPhoneNumber) {
-          console.warn("Telefone do cliente não disponível:", paymentStatus.payer);
+          console.warn("⚠️ Telefone não disponível:", paymentStatus.payer);
           return {
             statusCode: 400,
             body: JSON.stringify({ error: "Número de telefone não encontrado no pagamento." }),
           };
         }
 
-        // 🎟️ Geração do PIN
+        // 🎟️ Gera e salva o PIN
         const pin = generatePin();
         const expirationDate = new Date();
         expirationDate.setDate(expirationDate.getDate() + 30);
@@ -87,9 +95,9 @@ export const handler = async (event: any) => {
           mercadoPagoPaymentId: paymentId,
         });
 
-        console.log(`PIN ${pin} gerado e salvo para o pagamento ${paymentId}`);
+        console.log(`✅ PIN ${pin} gerado e salvo.`);
 
-        // 📲 Envio do WhatsApp
+        // 📲 Envia mensagem via WhatsApp
         const whatsappPayload = {
           messaging_product: "whatsapp",
           to: customerPhoneNumber,
@@ -120,10 +128,10 @@ export const handler = async (event: any) => {
       body: JSON.stringify({ success: true, message: "Notificação ignorada" }),
     };
   } catch (error: any) {
-    console.error("❌ Erro:", error);
+    console.error("❌ Erro interno:", error);
     return {
       statusCode: 500,
-      body: JSON.stringify({ error: error.message }),
+      body: JSON.stringify({ error: error.message || "Erro interno" }),
     };
   }
 };
