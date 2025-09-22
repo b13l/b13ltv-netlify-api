@@ -1,5 +1,2 @@
-
-
-[[edge_functions]]
-function = "image-external"
-path = "/on"
+[build]
+  functions = "netlify/functions"
